@@ -7,6 +7,7 @@ const multer = require('multer');
 const { mapLeadToJobFields } = require('./leadConversion');
 const { extractCargoLines } = require('./cargoLines');
 const { deriveMetrics, computeRateAmount } = require('./rateCalc');
+const { deriveLeadMetrics, deriveReengagementList } = require('./monthlyReport');
 const app = express();
 
 // Return NUMERIC/DECIMAL (type OID 1700) as a JS number instead of a string.
@@ -3128,6 +3129,164 @@ app.post('/api/jobs/:id/rate-preview', async (req, res) => {
   } catch (err) {
     console.error(`[ZHL] ${req.method} ${req.url}`, err.message)
     res.status(500).json({ error: 'Something went wrong. Please try again.' })
+  }
+})
+
+// ─── MONTHLY BD REPORT ───────────────────────────────────────────────────────
+// Gathers a month of pipeline and revenue for the management meeting, and has Claude
+// write the commentary around it.
+//
+// The division of labour is deliberate and load-bearing: every NUMBER in the response
+// is computed here from the database, and the model is given those figures and asked
+// only for words. It is never asked to count, total or calculate anything. A deck that
+// goes to company leadership cannot contain a figure a language model invented.
+//
+// What the model is genuinely better at, and what it is actually used for, is reading
+// the free-text lost_reason field across a month of losses and telling you that six of
+// them were about transit time rather than price. No SQL query produces that.
+
+function monthWindow(monthParam) {
+  // Accepts YYYY-MM; defaults to the current month.
+  const now = new Date()
+  let year = now.getFullYear(), month = now.getMonth()
+  if (/^\d{4}-\d{2}$/.test(monthParam || '')) {
+    const [y, m] = monthParam.split('-').map(Number)
+    if (m >= 1 && m <= 12) { year = y; month = m - 1 }
+  }
+  const start = new Date(year, month, 1)
+  const end = new Date(year, month + 1, 1)
+  const prevStart = new Date(year, month - 1, 1)
+  const label = start.toLocaleDateString('en-SG', { month: 'long', year: 'numeric' })
+  return { start, end, prevStart, label }
+}
+
+async function buildMonthlyReport(monthParam) {
+  const { start, end, prevStart, label } = monthWindow(monthParam)
+
+  const [leadsRes, prevLeadsRes, revenueRes, byModeRes, dormantRes, salesRes] = await Promise.all([
+    pool.query(`SELECT * FROM leads WHERE created_at >= $1 AND created_at < $2`, [start, end]),
+    pool.query(`SELECT * FROM leads WHERE created_at >= $1 AND created_at < $2`, [prevStart, start]),
+    pool.query(`
+      SELECT COALESCE(SUM(b.total),0) AS sale, COALESCE(SUM(c.total),0) AS cost, COUNT(*) AS jobs
+      FROM jobs j
+      LEFT JOIN (SELECT job_id, SUM(rate*qty) AS total FROM billing_lines GROUP BY job_id) b ON b.job_id = j.id
+      LEFT JOIN (SELECT job_id, SUM(amount)   AS total FROM cost_lines    GROUP BY job_id) c ON c.job_id = j.id
+      WHERE j.created_at >= $1 AND j.created_at < $2 AND COALESCE(j.status,'') <> 'Voided'`, [start, end]),
+    pool.query(`
+      SELECT COALESCE(NULLIF(j.mode,''),'Unspecified') AS mode,
+             COUNT(*) AS jobs,
+             COALESCE(SUM(b.total),0) AS sale,
+             COALESCE(SUM(c.total),0) AS cost
+      FROM jobs j
+      LEFT JOIN (SELECT job_id, SUM(rate*qty) AS total FROM billing_lines GROUP BY job_id) b ON b.job_id = j.id
+      LEFT JOIN (SELECT job_id, SUM(amount)   AS total FROM cost_lines    GROUP BY job_id) c ON c.job_id = j.id
+      WHERE j.created_at >= $1 AND j.created_at < $2 AND COALESCE(j.status,'') <> 'Voided'
+      GROUP BY 1 ORDER BY sale DESC`, [start, end]),
+    // Not restricted to the month: the point of this list is old leads worth chasing.
+    pool.query(`SELECT * FROM leads WHERE is_archived = TRUE ORDER BY quoted_price DESC NULLS LAST LIMIT 40`),
+    pool.query(`
+      SELECT COALESCE(NULLIF(claimed_by,''),'Unassigned') AS person,
+             COUNT(*) FILTER (WHERE status='Won' OR stage='Won') AS won,
+             COUNT(*) AS handled,
+             COALESCE(SUM(quoted_price) FILTER (WHERE status='Won' OR stage='Won'),0) AS won_value
+      FROM leads WHERE created_at >= $1 AND created_at < $2
+      GROUP BY 1 ORDER BY won_value DESC`, [start, end]),
+  ])
+
+  const metrics = deriveLeadMetrics(leadsRes.rows)
+  const prev = deriveLeadMetrics(prevLeadsRes.rows)
+  const rev = revenueRes.rows[0] || {}
+  const sale = Number(rev.sale) || 0
+  const cost = Number(rev.cost) || 0
+
+  return {
+    month: label,
+    generated_at: new Date().toISOString(),
+    leads: metrics,
+    previous: {
+      received: prev.counts.received,
+      won: prev.counts.won,
+      wonValue: prev.value.won,
+      winRate: prev.rates.winRate,
+    },
+    revenue: {
+      jobs: Number(rev.jobs) || 0,
+      sale: Math.round(sale * 100) / 100,
+      cost: Math.round(cost * 100) / 100,
+      profit: Math.round((sale - cost) * 100) / 100,
+      gpPercent: sale > 0 ? Math.round(((sale - cost) / sale) * 1000) / 10 : 0,
+      byMode: byModeRes.rows.map(r => {
+        const s = Number(r.sale) || 0, c = Number(r.cost) || 0
+        return {
+          mode: r.mode, jobs: Number(r.jobs) || 0,
+          sale: Math.round(s * 100) / 100,
+          profit: Math.round((s - c) * 100) / 100,
+          gpPercent: s > 0 ? Math.round(((s - c) / s) * 1000) / 10 : 0,
+        }
+      }),
+    },
+    team: salesRes.rows.map(r => ({
+      person: r.person, handled: Number(r.handled) || 0,
+      won: Number(r.won) || 0, wonValue: Math.round((Number(r.won_value) || 0) * 100) / 100,
+    })),
+    reengage: deriveReengagementList(dormantRes.rows),
+  }
+}
+
+app.get('/api/reports/monthly', async (req, res) => {
+  try {
+    await ensureDB()
+    res.json(await buildMonthlyReport(req.query.month))
+  } catch (err) {
+    console.error(`[ZHL] ${req.method} ${req.url}`, err.message)
+    res.status(500).json({ error: 'Could not build the monthly report.' })
+  }
+})
+
+// Narrative layer. Separate from the data endpoint so the deck still builds if the AI
+// call fails — the numbers are the report, the commentary is a bonus.
+app.post('/api/reports/monthly/narrative', async (req, res) => {
+  try {
+    const report = req.body?.report
+    if (!report) return res.status(400).json({ error: 'No report data supplied.' })
+
+    const msg = await anthropic.messages.create({
+      model: 'claude-sonnet-5',
+      max_tokens: 3000,
+      system: 'You are preparing commentary for a freight forwarder\'s monthly management meeting, presented by the business development team to company leadership and middle management. Be direct and specific. Never invent or recalculate figures — every number is given to you and is already correct.',
+      messages: [{ role: 'user', content: `Here is this month's data. Write the commentary for the deck.
+
+${JSON.stringify(report, null, 2)}
+
+Return ONLY this JSON:
+{
+  "headline": "one sentence a director could repeat in a corridor. Reference the single most important movement.",
+  "findings": ["3 to 5 observations. Each must cite a figure from the data and say what it means. Prefer a comparison to last month where the data allows it."],
+  "lostThemes": [{"theme": "short label", "count": <how many of the listed losses fit it>, "detail": "one line, naming customers where useful"}],
+  "risks": ["1 to 3 things leadership should be uneasy about. Say nothing here rather than inventing a concern."],
+  "actions": ["3 to 5 concrete things to do before next month. Name the customer or lane where the data supports it."],
+  "speakerNotes": {
+    "overview": "what the presenter says over the headline numbers",
+    "pipeline": "what to say over the funnel",
+    "wins": "what to say over the wins",
+    "losses": "what to say over the losses, framed as learning rather than excuses",
+    "actions": "how to close the meeting"
+  }
+}
+
+Rules:
+- Group lostThemes from the free-text reasons in leads.lostReasons. That clustering is the main thing you are here for.
+- If response time is slow or leads sat unclaimed, say so plainly. This deck is presented by the BD team to their own leadership and has to be credible, not flattering.
+- Currency is SGD. Write naturally, no bullet-point fragments.` }],
+    })
+
+    const text = getResponseText(msg).replace(/```json\s*|\s*```/g, '').trim()
+    const match = text.match(/\{[\s\S]*\}/)
+    if (!match) return res.status(422).json({ error: 'Could not generate commentary.' })
+    res.json(JSON.parse(match[0]))
+  } catch (err) {
+    console.error(`[ZHL] ${req.method} ${req.url}`, err.message)
+    res.status(500).json({ error: 'Could not generate commentary.' })
   }
 })
 

@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ChevronDown, Circle, Mail, X, ArrowRight, Check, AlertTriangle, Sparkles, Inbox, ClipboardList, Paperclip, Upload, Trash2 } from 'lucide-react'
+import { ChevronDown, Circle, Mail, X, ArrowRight, Check, AlertTriangle, Sparkles, Inbox, ClipboardList, Paperclip, Upload, Trash2, Presentation } from 'lucide-react'
 import { getLeads, createLead, updateLead, deleteLead, getLeadStats, claimLead, generateEmail, convertLeadToJob, getMarketingContacts, deleteMarketingContact,
-  getLeadDocuments, uploadLeadDocument, deleteLeadDocument } from '../api'
+  getLeadDocuments, uploadLeadDocument, deleteLeadDocument,
+  getMonthlyReport, getMonthlyNarrative } from '../api'
 import { SectionHead, SectionBox } from '../components/SectionBox'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1412,6 +1413,7 @@ export default function Leads() {
   const [showArchived, setShowArchived] = useState(false)
   const [search, setSearch]       = useState('')
   const [modalLead, setModalLead] = useState(null)
+  const [deckBusy, setDeckBusy] = useState('')
   const [offset, setOffset]       = useState(0)
   const [hasMore, setHasMore]     = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -1483,6 +1485,51 @@ export default function Leads() {
 
   // Exports whatever is currently on screen — so ticking "Show archived" and hitting this
   // gives you the dormant-lead list to run a "do you still need this shipped?" follow-up from.
+  // Builds the management deck. Figures come from the server; the commentary is a
+  // separate call so a failure there still leaves a deck full of real numbers rather
+  // than nothing at all.
+  async function buildDeck() {
+    setDeckBusy('Gathering the month…')
+    try {
+      const { data: report } = await getMonthlyReport()
+
+      let narrative = null
+      try {
+        setDeckBusy('Writing the commentary…')
+        const { data } = await getMonthlyNarrative(report)
+        narrative = data
+      } catch {
+        console.warn('[Motus] narrative unavailable, building deck without commentary')
+      }
+
+      setDeckBusy('Building slides…')
+      // Rasterise the logo here rather than bundling it, matching how the PDFs do it.
+      const logo = await new Promise(resolve => {
+        const img = new Image()
+        img.onload = () => {
+          const canvas = document.createElement('canvas')
+          canvas.width = img.naturalWidth; canvas.height = img.naturalHeight
+          canvas.getContext('2d').drawImage(img, 0, 0)
+          resolve(canvas.toDataURL('image/png'))
+        }
+        img.onerror = () => resolve(null)
+        img.src = '/logo.png'
+      })
+
+      // pptxgenjs is heavy and only matters when someone asks for a deck.
+      const { buildMonthlyDeck } = await import('../utils/monthlyDeck')
+      await buildMonthlyDeck(report, narrative, logo)
+
+      if (!narrative) {
+        alert('Deck downloaded, but the AI commentary could not be generated. The slides contain the figures without the written analysis.')
+      }
+    } catch (err) {
+      alert('Could not build the deck: ' + (err?.response?.data?.error || err.message))
+    } finally {
+      setDeckBusy('')
+    }
+  }
+
   function exportLeadsCSV() {
     downloadCSV([
       ['Ref', 'Company', 'Contact', 'Email', 'Phone', 'Stage', 'Status', 'Industry',
@@ -1508,6 +1555,12 @@ export default function Leads() {
           <p>Manage freight enquiries and track opportunities</p>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button className="btn btn-ghost btn-sm" onClick={buildDeck} disabled={!!deckBusy}
+            title="Build this month's management deck as an editable PowerPoint">
+            {deckBusy
+              ? <><span className="spinner spinner-dark"></span> {deckBusy}</>
+              : <><Presentation size={14} /> Monthly Deck</>}
+          </button>
           <button className="btn btn-ghost btn-sm" onClick={fetchAll}>Refresh</button>
           <button className="btn btn-primary btn-sm" onClick={() => setModalLead({})}>+ New Lead</button>
         </div>

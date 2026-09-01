@@ -109,6 +109,11 @@ export const uploadLeadDocument = (id, file, doc_type = 'Other') => {
 }
 export const deleteLeadDocument = (id, did) => api.delete(`/leads/${id}/documents/${did}`)
 
+// Monthly BD report. The figures and the commentary are fetched separately so the deck
+// still builds from real data if the AI call fails.
+export const getMonthlyReport = (month) => api.get('/reports/monthly', { params: month ? { month } : {} })
+export const getMonthlyNarrative = (report) => api.post('/reports/monthly/narrative', { report })
+
 export const getMarketingContacts = () => api.get('/marketing-contacts')
 export const deleteMarketingContact = (id) => api.delete(`/marketing-contacts/${id}`)
 
