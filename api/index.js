@@ -8,6 +8,7 @@ const { mapLeadToJobFields } = require('./leadConversion');
 const { extractCargoLines } = require('./cargoLines');
 const { deriveMetrics, computeRateAmount } = require('./rateCalc');
 const { deriveLeadMetrics, deriveReengagementList } = require('./monthlyReport');
+const { periodWindow, deriveMovementMetrics, deriveTrend } = require('./movementReport');
 const app = express();
 
 // Return NUMERIC/DECIMAL (type OID 1700) as a JS number instead of a string.
@@ -3278,6 +3279,111 @@ Rules:
 - Group lostThemes from the free-text reasons in leads.lostReasons. That clustering is the main thing you are here for.
 - If response time is slow or leads sat unclaimed, say so plainly. This deck is presented by the BD team to their own leadership and has to be credible, not flattering.
 - Currency is SGD. Write naturally, no bullet-point fragments.` }],
+    })
+
+    const text = getResponseText(msg).replace(/```json\s*|\s*```/g, '').trim()
+    const match = text.match(/\{[\s\S]*\}/)
+    if (!match) return res.status(422).json({ error: 'Could not generate commentary.' })
+    res.json(JSON.parse(match[0]))
+  } catch (err) {
+    console.error(`[ZHL] ${req.method} ${req.url}`, err.message)
+    res.status(500).json({ error: 'Could not generate commentary.' })
+  }
+})
+
+// ─── JOB MOVEMENT REPORT ─────────────────────────────────────────────────────
+// The performance report: what was actually moved, what it earned, and how well it was
+// delivered, for a month, quarter or year. Leads measure what might come in; this
+// measures what the business did.
+//
+// Same rule as the pipeline report: every figure is computed here from the database and
+// the model is only ever asked for words.
+
+// One row per job with its billing and cost totals already folded in, so the metrics
+// module receives flat rows and stays free of SQL.
+const MOVEMENT_JOB_SQL = `
+  SELECT j.id, j.job_number, j.mode, j.status, j.customer_name, j.shipper,
+         j.weight, j.cbm, j.packages, j.date_out, j.date_delivered, j.deadline_date,
+         j.salesperson, j.created_by, j.created_at,
+         COALESCE(b.total, 0) AS sale,
+         COALESCE(c.total, 0) AS cost
+  FROM jobs j
+  LEFT JOIN (SELECT job_id, SUM(rate * qty) AS total FROM billing_lines GROUP BY job_id) b ON b.job_id = j.id
+  LEFT JOIN (SELECT job_id, SUM(amount)     AS total FROM cost_lines    GROUP BY job_id) c ON c.job_id = j.id
+  WHERE j.created_at >= $1 AND j.created_at < $2`
+
+async function buildMovementReport(periodRef) {
+  const { kind, start, end, prevStart, label } = periodWindow(periodRef)
+
+  const [cur, prev] = await Promise.all([
+    pool.query(MOVEMENT_JOB_SQL, [start, end]),
+    pool.query(MOVEMENT_JOB_SQL, [prevStart, start]),
+  ])
+
+  const metrics = deriveMovementMetrics(cur.rows)
+  const previous = deriveMovementMetrics(prev.rows)
+
+  return {
+    period: { kind, label, start: start.toISOString(), end: end.toISOString() },
+    generated_at: new Date().toISOString(),
+    ...metrics,
+    // A month has one bar and is not worth charting; a quarter or year has a shape.
+    trend: kind === 'month' ? [] : deriveTrend(cur.rows),
+    previous: {
+      label: periodWindow(periodRef).kind,
+      jobs: previous.volume.jobs,
+      sale: previous.money.sale,
+      profit: previous.money.profit,
+      gpPercent: previous.money.gpPercent,
+      onTimeRate: previous.delivery.onTimeRate,
+    },
+  }
+}
+
+app.get('/api/reports/movement', async (req, res) => {
+  try {
+    await ensureDB()
+    res.json(await buildMovementReport(req.query.period))
+  } catch (err) {
+    console.error(`[ZHL] ${req.method} ${req.url}`, err.message)
+    res.status(500).json({ error: 'Could not build the movement report.' })
+  }
+})
+
+app.post('/api/reports/movement/narrative', async (req, res) => {
+  try {
+    const report = req.body?.report
+    if (!report) return res.status(400).json({ error: 'No report data supplied.' })
+
+    const msg = await anthropic.messages.create({
+      model: 'claude-sonnet-5',
+      max_tokens: 3000,
+      system: "You are preparing commentary for a freight forwarder's management review, presented to company leadership and middle management. Be direct and specific. Never invent or recalculate figures: every number is given to you and is already correct.",
+      messages: [{ role: 'user', content: `Here is the period's job movement data. Write the commentary for the deck.
+
+${JSON.stringify(report, null, 2)}
+
+Return ONLY this JSON:
+{
+  "headline": "one sentence a director could repeat in a corridor, naming the most important movement in the period",
+  "findings": ["3 to 5 observations. Each must cite a figure and say what it means. Compare against the previous period where the data allows."],
+  "operations": ["1 to 3 points specifically about delivery performance: on-time rate, lateness, transit times. Say plainly if it is poor."],
+  "risks": ["1 to 3 things leadership should be uneasy about. Customer concentration and revenue with no cost recorded are usually the candidates. Say nothing rather than inventing a concern."],
+  "actions": ["3 to 5 concrete things to do next period. Name the customer, mode or job where the data supports it."],
+  "speakerNotes": {
+    "overview": "what the presenter says over the headline figures",
+    "volume": "what to say over the volume and mode mix",
+    "delivery": "what to say over delivery performance",
+    "customers": "what to say over the customer table",
+    "actions": "how to close the meeting"
+  }
+}
+
+Notes:
+- Currency is SGD. Weight is kilograms, volume is CBM.
+- risk.missingCosting counts jobs carrying revenue with no supplier cost recorded yet. Those overstate profit until someone enters the invoice, so treat a high number as a data-quality warning, not as genuine margin.
+- risk.topCustomerShare is the largest customer's share of revenue. Above roughly 40% is worth naming as concentration risk.
+- Write naturally, not in bullet fragments.` }],
     })
 
     const text = getResponseText(msg).replace(/```json\s*|\s*```/g, '').trim()

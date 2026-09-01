@@ -3,8 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import * as XLSX from 'xlsx'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
-import { ChevronUp, ChevronDown, Download, FileText, ClipboardList, ArrowRight } from 'lucide-react'
-import { getJobs } from '../api'
+import { ChevronUp, ChevronDown, Download, FileText, ClipboardList, ArrowRight, Presentation } from 'lucide-react'
+import { getJobs, getMovementReport, getMovementNarrative } from '../api'
 import { parseLocalDate } from '../utils/format'
 
 const MODES = ['', 'Air Express', 'Air Freight', 'LCL Express', 'LCL', 'Local Delivery', 'Local Clearance & Delivery', 'Sea FCL', 'Sea LCL', 'Warehousing']
@@ -79,6 +79,8 @@ export default function MovementTracker() {
   const [jobs, setJobs] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [deckBusy, setDeckBusy] = useState('')
+  const [showDeckMenu, setShowDeckMenu] = useState(false)
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [filterMode, setFilterMode] = useState('')
@@ -182,6 +184,72 @@ export default function MovementTracker() {
     return emails
   }, [jobs])
 
+
+  // Builds the operations review deck for a month, quarter or year. Figures come from
+  // the server; the commentary is a separate call so a failure there still leaves a
+  // deck full of real numbers rather than nothing at all.
+  async function buildDeck(period) {
+    setShowDeckMenu(false)
+    setDeckBusy('Gathering the period…')
+    try {
+      const { data: report } = await getMovementReport(period)
+
+      let narrative = null
+      try {
+        setDeckBusy('Writing the commentary…')
+        const { data } = await getMovementNarrative(report)
+        narrative = data
+      } catch {
+        console.warn('[Motus] narrative unavailable, building deck without commentary')
+      }
+
+      setDeckBusy('Building slides…')
+      const logo = await new Promise(resolve => {
+        const img = new Image()
+        img.onload = () => {
+          const canvas = document.createElement('canvas')
+          canvas.width = img.naturalWidth; canvas.height = img.naturalHeight
+          canvas.getContext('2d').drawImage(img, 0, 0)
+          resolve(canvas.toDataURL('image/png'))
+        }
+        img.onerror = () => resolve(null)
+        img.src = '/logo.png'
+      })
+
+      // pptxgenjs is heavy and only matters when someone asks for a deck.
+      const { buildMovementDeck } = await import('../utils/movementDeck')
+      await buildMovementDeck(report, narrative, logo)
+
+      if (!narrative) {
+        alert('Deck downloaded, but the AI commentary could not be generated. The slides contain the figures without the written analysis.')
+      }
+    } catch (err) {
+      alert('Could not build the deck: ' + (err?.response?.data?.error || err.message))
+    } finally {
+      setDeckBusy('')
+    }
+  }
+
+  // Offer this period and the last few, so the common cases are one click and nobody
+  // has to work out what to type.
+  function deckPeriods() {
+    const now = new Date()
+    const y = now.getFullYear(), m = now.getMonth()
+    const monthRef = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`
+    const monthName = (dt) => dt.toLocaleDateString('en-SG', { month: 'long', year: 'numeric' })
+    const thisMonth = new Date(y, m, 1)
+    const lastMonth = new Date(y, m - 1, 1)
+    const q = Math.floor(m / 3) + 1
+    const prevQ = q === 1 ? { q: 4, y: y - 1 } : { q: q - 1, y }
+    return [
+      { label: monthName(thisMonth), ref: monthRef(thisMonth), group: 'Month' },
+      { label: monthName(lastMonth), ref: monthRef(lastMonth), group: 'Month' },
+      { label: `Q${q} ${y}`, ref: `${y}-Q${q}`, group: 'Quarter' },
+      { label: `Q${prevQ.q} ${prevQ.y}`, ref: `${prevQ.y}-Q${prevQ.q}`, group: 'Quarter' },
+      { label: String(y), ref: String(y), group: 'Year' },
+      { label: String(y - 1), ref: String(y - 1), group: 'Year' },
+    ]
+  }
 
   function exportExcel() {
     const rows = sorted.map(j => ({
@@ -335,6 +403,40 @@ export default function MovementTracker() {
           <p>{jobs.length} job{jobs.length !== 1 ? 's' : ''} found</p>
         </div>
         <div className="flex gap-2">
+          <div style={{ position: 'relative', display: 'inline-block' }}>
+            <button className="btn btn-ghost btn-sm" onClick={() => setShowDeckMenu(v => !v)} disabled={!!deckBusy}
+              title="Build an operations review deck as an editable PowerPoint">
+              {deckBusy
+                ? <><span className="spinner spinner-dark"></span> {deckBusy}</>
+                : <><Presentation size={14} style={{ marginRight: 4, verticalAlign: 'middle' }} />Review Deck</>}
+            </button>
+            {showDeckMenu && !deckBusy && (
+              <>
+                {/* full-screen catcher so a click anywhere closes the menu */}
+                <div style={{ position: 'fixed', inset: 0, zIndex: 199 }} onClick={() => setShowDeckMenu(false)} />
+                <div style={{
+                  position: 'absolute', top: '100%', right: 0, zIndex: 200, marginTop: 4, minWidth: 190,
+                  background: 'var(--surface)', border: '1px solid var(--border-solid)', borderRadius: 8,
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.18)', overflow: 'hidden',
+                }}>
+                  {deckPeriods().map((p, i, arr) => (
+                    <div key={p.ref}>
+                      {(i === 0 || arr[i - 1].group !== p.group) && (
+                        <div style={{ padding: '7px 12px 3px', fontSize: 9, fontWeight: 800, letterSpacing: '0.5px',
+                          textTransform: 'uppercase', color: 'var(--text-muted)' }}>{p.group}</div>
+                      )}
+                      <div onClick={() => buildDeck(p.ref)}
+                        style={{ padding: '7px 12px', fontSize: 13, cursor: 'pointer', color: 'var(--text)' }}
+                        onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
+                        onMouseLeave={e => e.currentTarget.style.background = ''}>
+                        {p.label}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
           <button className="btn btn-ghost btn-sm" onClick={exportExcel}><Download size={14} style={{ marginRight: 4, verticalAlign: 'middle' }} />Export Excel</button>
           <button className="btn btn-ghost btn-sm" onClick={exportPDFReport}><FileText size={14} style={{ marginRight: 4, verticalAlign: 'middle' }} />PDF Report</button>
           <button className="btn btn-primary" onClick={() => navigate('/intake')}>+ New Job</button>

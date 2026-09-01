@@ -114,6 +114,12 @@ export const deleteLeadDocument = (id, did) => api.delete(`/leads/${id}/document
 export const getMonthlyReport = (month) => api.get('/reports/monthly', { params: month ? { month } : {} })
 export const getMonthlyNarrative = (report) => api.post('/reports/monthly/narrative', { report })
 
+// Job movement report: the performance view. `period` is 'YYYY-MM', 'YYYY-Qn' or 'YYYY'.
+// Figures and commentary are separate calls so the deck still builds from real data if
+// the AI call fails.
+export const getMovementReport = (period) => api.get('/reports/movement', { params: period ? { period } : {} })
+export const getMovementNarrative = (report) => api.post('/reports/movement/narrative', { report })
+
 export const getMarketingContacts = () => api.get('/marketing-contacts')
 export const deleteMarketingContact = (id) => api.delete(`/marketing-contacts/${id}`)
 
