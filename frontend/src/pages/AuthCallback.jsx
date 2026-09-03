@@ -16,11 +16,10 @@ export default function AuthCallback() {
   const navigate = useNavigate()
   const { setNewPassword } = useAuth()
   const [error, setError] = useState('')
-  const [recovery, setRecovery] = useState(
-    // Supabase puts the flow type in the URL fragment. Read it synchronously so the
-    // recovery form renders immediately rather than flashing the redirect first.
-    () => /type=recovery/.test(window.location.hash)
-  )
+  // Recovery has its own route now (/auth/reset). This flag only catches links that
+  // were emailed before that change and still point here — the fragment they carried is
+  // already consumed by the time this mounts, so the event is the only usable signal.
+  const [recovery, setRecovery] = useState(false)
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [saving, setSaving] = useState(false)

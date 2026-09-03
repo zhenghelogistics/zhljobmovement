@@ -17,6 +17,7 @@ const ProfileModal = lazy(() => import('./components/ProfileModal'))
 // visitor sees, so lazy-loading them would only add a spinner to the critical path.
 import Login from './pages/Login'
 import AuthCallback from './pages/AuthCallback'
+import ResetPassword from './pages/ResetPassword'
 const Dashboard       = lazy(() => import('./pages/Dashboard'))
 const MovementTracker = lazy(() => import('./pages/MovementTracker'))
 const JobDetail       = lazy(() => import('./pages/JobDetail'))
@@ -565,6 +566,10 @@ function AppShell() {
 
   // Auth callback must be accessible without a session
   if (window.location.pathname === '/auth/callback') return <AuthCallback />
+  // Must come before the signed-in gate below: a recovery link already establishes a
+  // session, so without this the user is considered logged in and never gets asked to
+  // choose a new password.
+  if (window.location.pathname === '/auth/reset') return <ResetPassword />
 
   // Show nothing while we check if the user is already logged in
   if (loading) return (
@@ -606,6 +611,7 @@ function AppShell() {
             <Route path="/leads"    element={<Leads />} />
             <Route path="/rates"    element={<RateCards />} />
             <Route path="/auth/callback" element={<AuthCallback />} />
+            <Route path="/auth/reset"    element={<ResetPassword />} />
           </Routes>
           </Suspense>
         </div>

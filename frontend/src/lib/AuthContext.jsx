@@ -60,7 +60,7 @@ export function AuthProvider({ children }) {
   // wording either way rather than leaking that distinction ourselves.
   async function requestPasswordReset(email) {
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/auth/callback`,
+      redirectTo: `${window.location.origin}/auth/reset`,
     })
     if (error) throw error
   }
