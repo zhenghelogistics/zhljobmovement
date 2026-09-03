@@ -4,7 +4,8 @@ import * as XLSX from 'xlsx'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import { ChevronUp, ChevronDown, Download, FileText, ClipboardList, ArrowRight, Presentation } from 'lucide-react'
-import { getJobs, getMovementReport, getMovementNarrative } from '../api'
+import { getJobs, getMovementReport, getMovementQuestions, getMovementNarrative } from '../api'
+import DeckQuestions from '../components/DeckQuestions'
 import { parseLocalDate } from '../utils/format'
 
 const MODES = ['', 'Air Express', 'Air Freight', 'LCL Express', 'LCL', 'Local Delivery', 'Local Clearance & Delivery', 'Sea FCL', 'Sea LCL', 'Warehousing']
@@ -81,6 +82,7 @@ export default function MovementTracker() {
   const [error, setError] = useState('')
   const [deckBusy, setDeckBusy] = useState('')
   const [showDeckMenu, setShowDeckMenu] = useState(false)
+  const [deckAsk, setDeckAsk] = useState(null)  // { report, questions }
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [filterMode, setFilterMode] = useState('')
@@ -188,16 +190,44 @@ export default function MovementTracker() {
   // Builds the operations review deck for a month, quarter or year. Figures come from
   // the server; the commentary is a separate call so a failure there still leaves a
   // deck full of real numbers rather than nothing at all.
+  // Step one: pull the period, then let the model ask about anything it cannot explain
+  // from the figures alone. Those answers are the difference between commentary that
+  // restates numbers and commentary that says something.
   async function buildDeck(period) {
     setShowDeckMenu(false)
     setDeckBusy('Gathering the period…')
     try {
       const { data: report } = await getMovementReport(period)
 
+      let questions = []
+      try {
+        setDeckBusy('Reviewing the figures…')
+        const { data } = await getMovementQuestions(report)
+        questions = data.questions || []
+      } catch {
+        // Never block the deck on this.
+      }
+
+      if (questions.length) {
+        setDeckBusy('')
+        setDeckAsk({ report, questions })   // hand over to the prompt
+        return
+      }
+      await finishDeck(report, [])
+    } catch (err) {
+      alert('Could not build the deck: ' + (err?.response?.data?.error || err.message))
+      setDeckBusy('')
+    }
+  }
+
+  // Step two: write the commentary and assemble the slides.
+  async function finishDeck(report, answers) {
+    setDeckAsk(null)
+    setDeckBusy('Writing the commentary…')
+    try {
       let narrative = null
       try {
-        setDeckBusy('Writing the commentary…')
-        const { data } = await getMovementNarrative(report)
+        const { data } = await getMovementNarrative(report, answers)
         narrative = data
       } catch {
         console.warn('[Motus] narrative unavailable, building deck without commentary')
@@ -437,6 +467,15 @@ export default function MovementTracker() {
               </>
             )}
           </div>
+          {deckAsk && (
+            <DeckQuestions
+              questions={deckAsk.questions}
+              periodLabel={deckAsk.report.period.label}
+              onSubmit={answers => finishDeck(deckAsk.report, answers)}
+              onSkip={() => finishDeck(deckAsk.report, [])}
+              onClose={() => setDeckAsk(null)}
+            />
+          )}
           <button className="btn btn-ghost btn-sm" onClick={exportExcel}><Download size={14} style={{ marginRight: 4, verticalAlign: 'middle' }} />Export Excel</button>
           <button className="btn btn-ghost btn-sm" onClick={exportPDFReport}><FileText size={14} style={{ marginRight: 4, verticalAlign: 'middle' }} />PDF Report</button>
           <button className="btn btn-primary" onClick={() => navigate('/intake')}>+ New Job</button>

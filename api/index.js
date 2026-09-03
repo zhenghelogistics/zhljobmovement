@@ -8,7 +8,7 @@ const { mapLeadToJobFields } = require('./leadConversion');
 const { extractCargoLines } = require('./cargoLines');
 const { deriveMetrics, computeRateAmount } = require('./rateCalc');
 const { deriveLeadMetrics, deriveReengagementList } = require('./monthlyReport');
-const { periodWindow, deriveMovementMetrics, deriveTrend } = require('./movementReport');
+const { periodWindow, deriveMovementMetrics, deriveTrend, compareBreakdown, compareMargins } = require('./movementReport');
 const app = express();
 
 // Return NUMERIC/DECIMAL (type OID 1700) as a JS number instead of a string.
@@ -3341,6 +3341,16 @@ async function buildMovementReport(periodRef) {
       profit: previous.money.profit,
       gpPercent: previous.money.gpPercent,
       onTimeRate: previous.delivery.onTimeRate,
+      byMode: previous.byMode,
+      byCustomer: previous.byCustomer,
+    },
+    // What actually MOVED between the two periods. Without this the commentary can only
+    // restate this period's totals; with it, a customer that stopped spending or a
+    // service line quietly losing margin becomes visible.
+    changes: {
+      customers: compareBreakdown(metrics.byCustomer, previous.byCustomer),
+      modes: compareBreakdown(metrics.byMode, previous.byMode),
+      margins: compareMargins(metrics.byMode, previous.byMode),
     },
   }
 }
@@ -3355,40 +3365,99 @@ app.get('/api/reports/movement', async (req, res) => {
   }
 })
 
-app.post('/api/reports/movement/narrative', async (req, res) => {
+// Asks the presenter what the numbers cannot say.
+//
+// The data shows a customer stopped spending; it cannot say whether they left, paused,
+// or simply had nothing to ship this quarter. Those are different stories and lead to
+// different decisions, and getting them wrong in front of leadership is worse than not
+// mentioning them. So before writing anything, the model asks about the movements it
+// genuinely cannot explain, and the answers feed the commentary.
+app.post('/api/reports/movement/questions', async (req, res) => {
   try {
     const report = req.body?.report
     if (!report) return res.status(400).json({ error: 'No report data supplied.' })
 
     const msg = await anthropic.messages.create({
       model: 'claude-sonnet-5',
-      max_tokens: 3000,
-      system: "You are preparing commentary for a freight forwarder's management review, presented to company leadership and middle management. Be direct and specific. Never invent or recalculate figures: every number is given to you and is already correct.",
-      messages: [{ role: 'user', content: `Here is the period's job movement data. Write the commentary for the deck.
+      max_tokens: 1200,
+      system: "You prepare management reporting for a freight forwarder. You are reviewing a period's figures before writing commentary, and asking the presenter about things the data cannot explain by itself.",
+      messages: [{ role: 'user', content: `Here is the period's data.
 
 ${JSON.stringify(report, null, 2)}
 
+Identify the movements you genuinely cannot explain from the numbers alone, and ask about them. Return ONLY:
+
+{ "questions": [ { "id": "q1", "question": "...", "why": "...", "placeholder": "..." } ] }
+
+Rules:
+- At most 4 questions, fewer if there is little worth asking. Do not pad.
+- Ask only where the answer would change what you write. A figure that speaks for itself needs no question.
+- Ground every question in a specific figure, customer, mode or job from the data. "How was the quarter?" is useless; "Amandari billed S$40,000 last quarter and nothing this one — did they leave, pause, or just have nothing moving?" is useful.
+- Prioritise: a large customer vanishing, a service line losing margin, a sharp swing in on-time delivery, an unusual concentration.
+- "why" is one short line explaining what it would let you say. "placeholder" is a realistic example answer.
+- If the period is genuinely unremarkable, return {"questions": []} rather than inventing concerns.` }],
+    })
+
+    const text = getResponseText(msg).replace(/```json\s*|\s*```/g, '').trim()
+    const match = text.match(/\{[\s\S]*\}/)
+    if (!match) return res.json({ questions: [] })   // never block the deck on this
+    const parsed = JSON.parse(match[0])
+    res.json({ questions: Array.isArray(parsed.questions) ? parsed.questions.slice(0, 4) : [] })
+  } catch (err) {
+    console.error(`[ZHL] ${req.method} ${req.url}`, err.message)
+    // Questions are an enhancement, never a blocker.
+    res.json({ questions: [] })
+  }
+})
+
+app.post('/api/reports/movement/narrative', async (req, res) => {
+  try {
+    const report = req.body?.report
+    if (!report) return res.status(400).json({ error: 'No report data supplied.' })
+
+    // Context the presenter supplied in answer to the model's own questions. This is
+    // the only part of the deck that is not derived from the database, and it is what
+    // turns "revenue fell 30%" into "revenue fell 30% because Amandari paused pending
+    // their warehouse move, and they are expected back in Q4".
+    const answers = Array.isArray(req.body?.answers) ? req.body.answers.filter(a => a?.answer?.trim()) : []
+
+    const msg = await anthropic.messages.create({
+      model: 'claude-sonnet-5',
+      max_tokens: 3500,
+      system: "You write management commentary for a freight forwarder, presented to company leadership and middle management. You are direct, specific, and willing to say when something looks bad. You never invent or recalculate figures: every number you are given is already correct, and your job is to explain what it means.",
+      messages: [{ role: 'user', content: `Period data:
+
+${JSON.stringify(report, null, 2)}
+
+${answers.length ? `The presenter answered these questions about the period. Treat this as authoritative context and weave it into the commentary — it explains things the numbers cannot:
+
+${answers.map(a => `Q: ${a.question}\nA: ${a.answer}`).join('\n\n')}
+` : ''}
 Return ONLY this JSON:
 {
-  "headline": "one sentence a director could repeat in a corridor, naming the most important movement in the period",
-  "findings": ["3 to 5 observations. Each must cite a figure and say what it means. Compare against the previous period where the data allows."],
-  "operations": ["1 to 3 points specifically about delivery performance: on-time rate, lateness, transit times. Say plainly if it is poor."],
-  "risks": ["1 to 3 things leadership should be uneasy about. Customer concentration and revenue with no cost recorded are usually the candidates. Say nothing rather than inventing a concern."],
-  "actions": ["3 to 5 concrete things to do next period. Name the customer, mode or job where the data supports it."],
+  "headline": "one sentence naming the single most important thing that happened, with the figure that proves it",
+  "findings": ["3 to 5 observations"],
+  "operations": ["1 to 3 points on delivery performance"],
+  "risks": ["0 to 3 things leadership should be uneasy about"],
+  "actions": ["3 to 5 concrete things to do next period"],
   "speakerNotes": {
-    "overview": "what the presenter says over the headline figures",
-    "volume": "what to say over the volume and mode mix",
-    "delivery": "what to say over delivery performance",
-    "customers": "what to say over the customer table",
-    "actions": "how to close the meeting"
+    "overview": "...", "volume": "...", "delivery": "...", "customers": "...", "actions": "..."
   }
 }
 
-Notes:
-- Currency is SGD. Weight is kilograms, volume is CBM.
-- risk.missingCosting counts jobs carrying revenue with no supplier cost recorded yet. Those overstate profit until someone enters the invoice, so treat a high number as a data-quality warning, not as genuine margin.
-- risk.topCustomerShare is the largest customer's share of revenue. Above roughly 40% is worth naming as concentration risk.
-- Write naturally, not in bullet fragments.` }],
+What makes a finding worth including:
+- It says something the reader could not get by looking at the number themselves. "Revenue was S$128,400" is not a finding. "Revenue held flat while Sea FCL margin fell 10 points, so the same money is being earned on thinner work" is.
+- It names the specific customer, service line or job responsible. Vague findings are worthless in a management meeting.
+- It uses "changes" in the data. That object records what actually moved between periods: customers that appeared or vanished, service lines that grew or shrank, margins that shifted. That is where the real observations are — a customer worth S$40,000 last period and nothing this one is a story, and the totals alone will never show it.
+- Where the presenter has explained a movement, use their explanation rather than speculating.
+
+Also:
+- Prefer one sharp observation to three obvious ones. If there are only two things genuinely worth saying, return two.
+- risk.missingCosting counts jobs carrying revenue with no supplier cost recorded. Those overstate margin until the invoice is entered, so treat a high number as a data-quality caveat on the margin figures, not as real profit.
+- topCustomerShare above roughly 40% is worth naming as concentration risk.
+- If on-time delivery is poor, say so plainly. This is presented by the team to their own leadership and needs to be credible rather than flattering.
+- Currency is SGD, weight in kilograms, volume in CBM.
+- Write in full sentences, not bullet fragments. Speaker notes should read like something a person would actually say out loud.` }],
     })
 
     const text = getResponseText(msg).replace(/```json\s*|\s*```/g, '').trim()

@@ -118,7 +118,10 @@ export const getMonthlyNarrative = (report) => api.post('/reports/monthly/narrat
 // Figures and commentary are separate calls so the deck still builds from real data if
 // the AI call fails.
 export const getMovementReport = (period) => api.get('/reports/movement', { params: period ? { period } : {} })
-export const getMovementNarrative = (report) => api.post('/reports/movement/narrative', { report })
+// Asked before the commentary is written, so the presenter can explain movements the
+// data cannot account for. Answers are optional.
+export const getMovementQuestions = (report) => api.post('/reports/movement/questions', { report })
+export const getMovementNarrative = (report, answers) => api.post('/reports/movement/narrative', { report, answers })
 
 export const getMarketingContacts = () => api.get('/marketing-contacts')
 export const deleteMarketingContact = (id) => api.delete(`/marketing-contacts/${id}`)

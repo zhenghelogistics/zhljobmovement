@@ -183,3 +183,71 @@ test('asDay ignores a time component and rejects junk', () => {
   assert.strictEqual(asDay(''), null)
   assert.strictEqual(asDay('not-a-date'), null)
 })
+
+// ── period-over-period comparison ─────────────────────────────────────────────
+const { compareBreakdown, compareMargins } = require('./movementReport')
+
+const PREV = [
+  { key: 'Amandari', jobs: 6, value: 40000 },
+  { key: 'Jooyi',    jobs: 3, value: 12000 },
+  { key: 'Delta',    jobs: 2, value: 8000 },
+  { key: 'Tiny Co',  jobs: 1, value: 200 },
+]
+const CUR = [
+  { key: 'Jooyi',    jobs: 5, value: 21000 },  // grew 75%
+  { key: 'Delta',    jobs: 2, value: 7600 },   // -5%, within noise
+  { key: 'Newcomer', jobs: 2, value: 9000 },   // appeared
+  { key: 'Tiny Co',  jobs: 1, value: 100 },    // too small to matter
+]
+
+test('spots a customer that stopped spending entirely', () => {
+  const c = compareBreakdown(CUR, PREV)
+  assert.deepStrictEqual(c.vanished.map(v => v.key), ['Amandari'])
+  assert.strictEqual(c.vanished[0].was, 40000)
+})
+
+test('spots a customer that is new this period', () => {
+  const c = compareBreakdown(CUR, PREV)
+  assert.deepStrictEqual(c.appeared.map(v => v.key), ['Newcomer'])
+})
+
+test('reports meaningful growth and ignores noise', () => {
+  const c = compareBreakdown(CUR, PREV)
+  assert.deepStrictEqual(c.grew.map(v => v.key), ['Jooyi'])
+  assert.strictEqual(c.grew[0].changePct, 75)
+  assert.strictEqual(c.shrank.length, 0, 'a 5% dip is not a story')
+})
+
+test('trivial amounts are excluded from both directions', () => {
+  const c = compareBreakdown(CUR, PREV)
+  const mentioned = [...c.appeared, ...c.vanished, ...c.grew, ...c.shrank].map(x => x.key)
+  assert.ok(!mentioned.includes('Tiny Co'), 'a S$200 job should not appear as a movement')
+})
+
+test('a real decline is reported', () => {
+  const c = compareBreakdown(
+    [{ key: 'Acme', jobs: 2, value: 6000 }],
+    [{ key: 'Acme', jobs: 8, value: 30000 }],
+  )
+  assert.strictEqual(c.shrank[0].key, 'Acme')
+  assert.strictEqual(c.shrank[0].changePct, -80)
+})
+
+test('margin movement is surfaced per service line', () => {
+  const m = compareMargins(
+    [{ key: 'Sea FCL', value: 40000, gpPercent: 14.0 }, { key: 'Air', value: 20000, gpPercent: 22.3 }],
+    [{ key: 'Sea FCL', value: 35000, gpPercent: 24.0 }, { key: 'Air', value: 18000, gpPercent: 22.0 }],
+  )
+  // Sea FCL lost 10 points of margin while growing revenue: exactly the thing a single
+  // blended GP% would hide.
+  assert.strictEqual(m[0].key, 'Sea FCL')
+  assert.strictEqual(m[0].gpChange, -10)
+  assert.strictEqual(m.length, 1, 'Air moved 0.3 points and is not worth a slide')
+})
+
+test('comparison handles an empty previous period', () => {
+  const c = compareBreakdown(CUR, [])
+  assert.strictEqual(c.vanished.length, 0)
+  assert.ok(c.appeared.length > 0)
+  assert.deepStrictEqual(compareMargins(CUR, []), [])
+})

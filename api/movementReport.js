@@ -213,4 +213,72 @@ function deriveTrend(jobs = []) {
     }))
 }
 
-module.exports = { periodWindow, deriveMovementMetrics, deriveTrend, asDay, rank }
+/**
+ * Compare two ranked breakdowns to find what actually MOVED between periods.
+ *
+ * This is where observations come from. A model handed only this period's totals can
+ * restate them; handed what appeared, vanished, grew and shrank, it can tell you a
+ * customer worth S$40,000 last quarter has spent nothing this one — which is the sort
+ * of thing a management meeting exists to catch.
+ *
+ * @param current  ranked rows [{key, jobs, value}]
+ * @param previous same shape, prior period
+ * @param minValue ignore anything smaller than this in either period, so noise from
+ *                 trivial one-off jobs does not drown the real movements
+ */
+function compareBreakdown(current = [], previous = [], { minValue = 500, changePct = 20 } = {}) {
+  const prevMap = new Map(previous.map(r => [r.key, r]))
+  const curMap = new Map(current.map(r => [r.key, r]))
+
+  const appeared = [], vanished = [], grew = [], shrank = []
+
+  for (const c of current) {
+    const p = prevMap.get(c.key)
+    if (!p || p.value === 0) {
+      if (c.value >= minValue) appeared.push({ key: c.key, value: c.value, jobs: c.jobs })
+      continue
+    }
+    if (c.value < minValue && p.value < minValue) continue
+    const change = Math.round(((c.value - p.value) / Math.abs(p.value)) * 1000) / 10
+    if (change >= changePct) grew.push({ key: c.key, from: p.value, to: c.value, changePct: change })
+    else if (change <= -changePct) shrank.push({ key: c.key, from: p.value, to: c.value, changePct: change })
+  }
+
+  for (const p of previous) {
+    if (p.value >= minValue && !curMap.has(p.key)) {
+      vanished.push({ key: p.key, was: p.value, jobs: p.jobs })
+    }
+  }
+
+  const bySize = (a, b) => (b.to ?? b.value ?? b.was) - (a.to ?? a.value ?? a.was)
+  return {
+    appeared: appeared.sort(bySize).slice(0, 6),
+    vanished: vanished.sort((a, b) => b.was - a.was).slice(0, 6),
+    grew: grew.sort((a, b) => b.changePct - a.changePct).slice(0, 6),
+    shrank: shrank.sort((a, b) => a.changePct - b.changePct).slice(0, 6),
+  }
+}
+
+/** Margin movement per service line, which a single blended GP% hides completely. */
+function compareMargins(currentModes = [], previousModes = [], { minValue = 500 } = {}) {
+  const prev = new Map(previousModes.map(m => [m.key, m]))
+  return currentModes
+    .filter(m => m.value >= minValue && prev.has(m.key))
+    .map(m => {
+      const p = prev.get(m.key)
+      return {
+        key: m.key,
+        gpFrom: p.gpPercent, gpTo: m.gpPercent,
+        gpChange: Math.round((m.gpPercent - p.gpPercent) * 10) / 10,
+        revenueFrom: p.value, revenueTo: m.value,
+      }
+    })
+    .filter(m => Math.abs(m.gpChange) >= 2)   // ignore rounding-level wobble
+    .sort((a, b) => Math.abs(b.gpChange) - Math.abs(a.gpChange))
+    .slice(0, 6)
+}
+
+module.exports = {
+  periodWindow, deriveMovementMetrics, deriveTrend, asDay, rank,
+  compareBreakdown, compareMargins,
+}
