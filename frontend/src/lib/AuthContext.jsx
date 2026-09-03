@@ -55,8 +55,25 @@ export function AuthProvider({ children }) {
     await supabase.auth.signOut()
   }
 
+  // Sends the reset email. Supabase deliberately returns success whether or not the
+  // address exists, so this never reveals who has an account — and we surface the same
+  // wording either way rather than leaking that distinction ourselves.
+  async function requestPasswordReset(email) {
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${window.location.origin}/auth/callback`,
+    })
+    if (error) throw error
+  }
+
+  // Used after arriving back from the emailed link, at which point Supabase has already
+  // put a recovery session in place, so updateUser is authorised.
+  async function setNewPassword(password) {
+    const { error } = await supabase.auth.updateUser({ password })
+    if (error) throw error
+  }
+
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, signUp, signOut }}>
+    <AuthContext.Provider value={{ user, loading, signIn, signUp, signOut, requestPasswordReset, setNewPassword }}>
       {children}
     </AuthContext.Provider>
   )

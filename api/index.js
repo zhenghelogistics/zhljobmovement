@@ -153,8 +153,13 @@ async function requireAuth(req, res, next) {
     next()
   } catch (e) {
     recordAuth('remote-failed')
-    console.error('[ZHL] requireAuth error:', e.message)
-    res.status(401).json({ error: 'Unauthorized' })
+    // Reaching here means the call to Supabase itself failed — a network blip, a
+    // timeout, Supabase briefly unreachable. That is NOT the same as "your session is
+    // invalid", and returning 401 for it was logging every user out of the app the
+    // moment anything upstream hiccuped, because the client signs out on any 401.
+    // 503 says "could not verify right now, try again" and leaves the session intact.
+    console.error('[ZHL] requireAuth could not reach Supabase:', e.message)
+    res.status(503).json({ error: 'Could not verify your session right now. Please try again in a moment.' })
   }
 }
 

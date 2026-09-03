@@ -1,12 +1,15 @@
 import { useState } from 'react'
-import { CheckCircle } from 'lucide-react'
+import { CheckCircle, MailCheck } from 'lucide-react'
 import { useAuth } from '../lib/AuthContext'
+import { isRemembered, setRemembered } from '../lib/supabase'
 
 const ALLOWED_DOMAIN = '@zhenghe.com.sg'
 
 export default function Login() {
-  const { signIn, signUp } = useAuth()
-  const [mode, setMode] = useState('login') // 'login' | 'signup' | 'success'
+  const { signIn, signUp, requestPasswordReset } = useAuth()
+  // 'login' | 'signup' | 'success' | 'forgot' | 'sent'
+  const [mode, setMode] = useState('login')
+  const [remember, setRemember] = useState(isRemembered())
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -24,6 +27,19 @@ export default function Login() {
     e.preventDefault()
     setError('')
 
+    if (mode === 'forgot') {
+      setLoading(true)
+      try {
+        await requestPasswordReset(email)
+        setMode('sent')
+      } catch (err) {
+        setError(err.message || 'Could not send the reset email. Please try again.')
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
+
     if (mode === 'signup') {
       if (!email.toLowerCase().endsWith(ALLOWED_DOMAIN)) {
         return setError(`Only ${ALLOWED_DOMAIN} email addresses can create an account.`)
@@ -39,6 +55,9 @@ export default function Login() {
     setLoading(true)
     try {
       if (mode === 'login') {
+        // Set before signing in: the storage adapter reads this flag when Supabase
+        // writes the new session, so the choice has to be in place first.
+        setRemembered(remember)
         await signIn(email, password)
       } else {
         await signUp(email, password)
@@ -73,7 +92,7 @@ export default function Login() {
         </div>
 
         {/* Tab toggle */}
-        {mode !== 'success' && (
+        {!['success', 'forgot', 'sent'].includes(mode) && (
           <div style={{
             display: 'flex', background: '#F1F4F7', borderRadius: 10, padding: 3, marginBottom: 24,
           }}>
@@ -92,8 +111,27 @@ export default function Login() {
           </div>
         )}
 
-        {/* Success state */}
-        {mode === 'success' ? (
+        {/* Reset email sent */}
+        {mode === 'sent' ? (
+          <div style={{ textAlign: 'center', padding: '12px 0 8px' }}>
+            <div style={{ marginBottom: 16 }}><MailCheck size={40} color="var(--green)" /></div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: 'var(--heading)', marginBottom: 8 }}>
+              Check your email
+            </div>
+            <div style={{ fontSize: 13, color: '#6B7E93', marginBottom: 20, lineHeight: 1.6 }}>
+              If <strong>{email}</strong> has an account, a reset link is on its way. The link
+              works once and expires after an hour.
+            </div>
+            <div style={{ fontSize: 12, color: '#9CA3AF', marginBottom: 20, lineHeight: 1.6 }}>
+              Nothing after a few minutes? Check spam. Repeated requests in quick succession
+              may be held back by the mail provider — wait a while before trying again.
+            </div>
+            <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', height: 44 }}
+              onClick={() => switchMode('login')}>
+              Back to Sign In
+            </button>
+          </div>
+        ) : mode === 'success' ? (
           <div style={{ textAlign: 'center', padding: '12px 0 8px' }}>
             <div style={{ marginBottom: 16 }}><CheckCircle size={40} color="var(--green)" /></div>
             <div style={{ fontSize: 16, fontWeight: 800, color: 'var(--heading)', marginBottom: 8 }}>
@@ -130,7 +168,13 @@ export default function Login() {
               )}
             </div>
 
-            <div className="form-group" style={{ marginBottom: mode === 'signup' ? 14 : 24 }}>
+            {mode === 'forgot' && (
+              <div style={{ fontSize: 12.5, color: '#6B7E93', lineHeight: 1.6, marginBottom: 16, marginTop: -4 }}>
+                Enter your work email and we&apos;ll send you a link to set a new password.
+              </div>
+            )}
+
+            <div className="form-group" style={{ marginBottom: mode === 'signup' ? 14 : 24, display: mode === 'forgot' ? 'none' : undefined }}>
               <label className="form-label">Password</label>
               <input
                 type="password"
@@ -138,7 +182,7 @@ export default function Login() {
                 placeholder={mode === 'signup' ? 'At least 8 characters' : '••••••••'}
                 value={password}
                 onChange={e => setPassword(e.target.value)}
-                required
+                required={mode !== 'forgot'}
               />
             </div>
 
@@ -153,6 +197,21 @@ export default function Login() {
                   onChange={e => setConfirm(e.target.value)}
                   required
                 />
+              </div>
+            )}
+
+            {mode === 'login' && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20, marginTop: -8 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12.5, color: '#4A5568', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} />
+                  Keep me signed in
+                </label>
+                <button type="button" onClick={() => switchMode('forgot')} style={{
+                  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                  fontSize: 12.5, color: 'var(--blue)', fontWeight: 600, fontFamily: 'var(--font)',
+                }}>
+                  Forgot password?
+                </button>
               </div>
             )}
 
@@ -172,11 +231,24 @@ export default function Login() {
               disabled={loading}
             >
               {loading
-                ? <><span className="spinner"></span> {mode === 'login' ? 'Signing in...' : 'Creating account...'}</>
-                : mode === 'login' ? 'Sign In' : 'Create Account'
+                ? <><span className="spinner"></span> {
+                    mode === 'login' ? 'Signing in...' : mode === 'forgot' ? 'Sending...' : 'Creating account...'
+                  }</>
+                : mode === 'login' ? 'Sign In' : mode === 'forgot' ? 'Send Reset Link' : 'Create Account'
               }
             </button>
           </form>
+        )}
+
+        {mode === 'forgot' && (
+          <div style={{ textAlign: 'center', marginTop: 16 }}>
+            <button type="button" onClick={() => switchMode('login')} style={{
+              background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+              fontSize: 12.5, color: 'var(--blue)', fontWeight: 600, fontFamily: 'var(--font)',
+            }}>
+              Back to Sign In
+            </button>
+          </div>
         )}
 
         <div style={{ textAlign: 'center', marginTop: 20, fontSize: 11, color: '#9CA3AF' }}>
