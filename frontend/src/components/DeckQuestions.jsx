@@ -10,13 +10,24 @@ import { X, Sparkles } from 'lucide-react'
 //
 // Every question is skippable. A deck built without answers is still a deck built from
 // real figures; it just says less.
-export default function DeckQuestions({ questions, periodLabel, onSubmit, onSkip, onClose }) {
+// Always offered, even when the model had nothing specific to ask. The whole point of
+// this step is that the presenter can supply what the data cannot, and that is just as
+// true in a quiet period as a dramatic one.
+const CATCH_ALL = {
+  id: '_context',
+  question: "Anything else about this period the figures don't show?",
+  why: 'A customer pausing, someone on leave, a one-off job — context like this changes how the numbers should be read.',
+  placeholder: 'e.g. Amandari paused pending their warehouse move, expected back in Q4',
+}
+
+export default function DeckQuestions({ questions, periodLabel, note, onSubmit, onSkip, onClose }) {
   const [answers, setAnswers] = useState({})
   const set = (id, v) => setAnswers(a => ({ ...a, [id]: v }))
-  const answered = questions.filter(q => (answers[q.id] || '').trim()).length
+  const all = [...questions, CATCH_ALL]
+  const answered = all.filter(q => (answers[q.id] || '').trim()).length
 
   function submit() {
-    onSubmit(questions.map(q => ({
+    onSubmit(all.map(q => ({
       id: q.id, question: q.question, answer: (answers[q.id] || '').trim(),
     })).filter(a => a.answer))
   }
@@ -33,12 +44,18 @@ export default function DeckQuestions({ questions, periodLabel, onSubmit, onSkip
 
         <div className="modal-body">
           <p style={{ fontSize: 12.5, color: 'var(--text-muted)', marginTop: 0, marginBottom: 20, lineHeight: 1.6 }}>
-            Looking at {periodLabel}, these movements stand out but can&apos;t be explained from the
-            data alone. Answering makes the commentary specific rather than generic. Skip anything
-            you&apos;d rather not comment on.
+            {questions.length
+              ? <>Looking at {periodLabel}, these movements stand out but can&apos;t be explained from
+                  the data alone. Answering makes the commentary specific rather than generic. Skip
+                  anything you&apos;d rather not comment on.</>
+              : note === 'failed' || note === 'unreadable'
+                ? <>The review step couldn&apos;t run this time, so there are no specific questions.
+                    You can still add context below, and the deck will build either way.</>
+                : <>Nothing in {periodLabel} stood out as needing explanation. Add anything the
+                    figures don&apos;t show, or skip straight to building.</>}
           </p>
 
-          {questions.map((q, i) => (
+          {all.map((q, i) => (
             <div key={q.id} style={{ marginBottom: 20 }}>
               <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 6 }}>
                 <div style={{
@@ -71,7 +88,7 @@ export default function DeckQuestions({ questions, periodLabel, onSubmit, onSkip
 
         <div className="modal-footer" style={{ justifyContent: 'space-between' }}>
           <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            {answered} of {questions.length} answered
+            {answered} of {all.length} answered
           </span>
           <div style={{ display: 'flex', gap: 10 }}>
             <button className="btn btn-ghost btn-sm" onClick={onSkip}>Skip and build</button>

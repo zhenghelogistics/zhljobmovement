@@ -199,21 +199,21 @@ export default function MovementTracker() {
     try {
       const { data: report } = await getMovementReport(period)
 
-      let questions = []
+      let questions = [], note = 'failed'
       try {
         setDeckBusy('Reviewing the figures…')
         const { data } = await getMovementQuestions(report)
         questions = data.questions || []
+        note = data.note || 'ok'
       } catch {
         // Never block the deck on this.
       }
 
-      if (questions.length) {
-        setDeckBusy('')
-        setDeckAsk({ report, questions })   // hand over to the prompt
-        return
-      }
-      await finishDeck(report, [])
+      // Always open the prompt, even with no generated questions: the presenter should
+      // always get the chance to add what the figures cannot show, and in a quiet period
+      // that context matters more, not less.
+      setDeckBusy('')
+      setDeckAsk({ report, questions, note })
     } catch (err) {
       alert('Could not build the deck: ' + (err?.response?.data?.error || err.message))
       setDeckBusy('')
@@ -470,6 +470,7 @@ export default function MovementTracker() {
           {deckAsk && (
             <DeckQuestions
               questions={deckAsk.questions}
+              note={deckAsk.note}
               periodLabel={deckAsk.report.period.label}
               onSubmit={answers => finishDeck(deckAsk.report, answers)}
               onSkip={() => finishDeck(deckAsk.report, [])}

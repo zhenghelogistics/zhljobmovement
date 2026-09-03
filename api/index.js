@@ -3400,13 +3400,17 @@ Rules:
 
     const text = getResponseText(msg).replace(/```json\s*|\s*```/g, '').trim()
     const match = text.match(/\{[\s\S]*\}/)
-    if (!match) return res.json({ questions: [] })   // never block the deck on this
+    // Always 200 so the deck is never blocked, but say WHY the list is empty. Returning
+    // a bare [] for both "nothing worth asking" and "this failed" made the two
+    // indistinguishable from the outside, which is no way to debug it.
+    if (!match) return res.json({ questions: [], note: 'unreadable' })
     const parsed = JSON.parse(match[0])
-    res.json({ questions: Array.isArray(parsed.questions) ? parsed.questions.slice(0, 4) : [] })
+    const questions = Array.isArray(parsed.questions) ? parsed.questions.slice(0, 4) : []
+    console.log(`[ZHL] deck questions: ${questions.length} generated for ${report?.period?.label || 'period'}`)
+    res.json({ questions, note: questions.length ? 'ok' : 'nothing-notable' })
   } catch (err) {
     console.error(`[ZHL] ${req.method} ${req.url}`, err.message)
-    // Questions are an enhancement, never a blocker.
-    res.json({ questions: [] })
+    res.json({ questions: [], note: 'failed' })
   }
 })
 
