@@ -1,5 +1,18 @@
 import { createClient } from '@supabase/supabase-js'
 
+// Captured at module load, BEFORE createClient runs.
+//
+// Supabase only honours a redirectTo that appears in its Redirect URLs allowlist. When
+// it does not, it silently falls back to the project's Site URL — so a recovery link
+// lands on the app homepage instead of the reset page, and the user is never asked for
+// a new password. This flag lets the app recognise that case and route itself.
+//
+// It has to be read here because createClient with detectSessionInUrl consumes and
+// clears the fragment during construction; anything reading window.location.hash later
+// finds nothing.
+const initialUrl = typeof window !== 'undefined' ? window.location.hash + window.location.search : ''
+export const arrivedViaRecoveryLink = /type=recovery/.test(initialUrl)
+
 // Whether the session should outlive the browser being closed.
 //
 // Supabase already persists to localStorage by default, so staying signed in was

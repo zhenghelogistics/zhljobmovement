@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { CheckCircle } from 'lucide-react'
 import { useAuth } from '../lib/AuthContext'
 
@@ -15,8 +14,7 @@ import { useAuth } from '../lib/AuthContext'
 //
 // A distinct URL removes the guesswork entirely: arriving here means recovery.
 export default function ResetPassword() {
-  const navigate = useNavigate()
-  const { setNewPassword } = useAuth()
+  const { setNewPassword, signOut } = useAuth()
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [error, setError] = useState('')
@@ -32,8 +30,17 @@ export default function ResetPassword() {
     setSaving(true)
     try {
       await setNewPassword(password)
+
+      // Sign out and send them back to the login screen rather than dropping them
+      // straight into the app. The recovery link left a session in place, so staying
+      // signed in would mean nobody ever types the new password and nobody finds out
+      // until the next login whether it took. Ending here proves it works, and proves
+      // the old one no longer does.
+      await signOut()
       setDone(true)
-      setTimeout(() => navigate('/', { replace: true }), 1600)
+      // Full reload rather than a route change, so no recovery session or stale auth
+      // state survives into the fresh login.
+      setTimeout(() => { window.location.href = '/' }, 1800)
     } catch (err) {
       // The usual cause is an expired or already-used link, so say that rather than
       // showing a raw provider message.
@@ -63,7 +70,9 @@ export default function ResetPassword() {
             <>
               <div style={{ marginBottom: 12 }}><CheckCircle size={40} color="var(--green)" /></div>
               <div style={{ fontSize: 16, fontWeight: 800, color: 'var(--heading)', marginBottom: 6 }}>Password updated</div>
-              <div style={{ fontSize: 13, color: '#6B7E93' }}>Signing you in…</div>
+              <div style={{ fontSize: 13, color: '#6B7E93', lineHeight: 1.6 }}>
+                Your old password no longer works.<br />Taking you to the sign-in screen…
+              </div>
             </>
           ) : (
             <>

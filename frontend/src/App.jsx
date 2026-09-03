@@ -18,6 +18,7 @@ const ProfileModal = lazy(() => import('./components/ProfileModal'))
 import Login from './pages/Login'
 import AuthCallback from './pages/AuthCallback'
 import ResetPassword from './pages/ResetPassword'
+import { arrivedViaRecoveryLink } from './lib/supabase'
 const Dashboard       = lazy(() => import('./pages/Dashboard'))
 const MovementTracker = lazy(() => import('./pages/MovementTracker'))
 const JobDetail       = lazy(() => import('./pages/JobDetail'))
@@ -569,7 +570,11 @@ function AppShell() {
   // Must come before the signed-in gate below: a recovery link already establishes a
   // session, so without this the user is considered logged in and never gets asked to
   // choose a new password.
-  if (window.location.pathname === '/auth/reset') return <ResetPassword />
+  //
+  // The second condition is the safety net for when Supabase ignored our redirectTo —
+  // it does that whenever the URL is missing from its allowlist — and dropped the user
+  // on the Site URL instead. Without it the reset silently does nothing.
+  if (window.location.pathname === '/auth/reset' || arrivedViaRecoveryLink) return <ResetPassword />
 
   // Show nothing while we check if the user is already logged in
   if (loading) return (
